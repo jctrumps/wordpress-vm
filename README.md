@@ -1,4 +1,4 @@
-# wordpress-platform
+# wordpress-vm
 
 Multi-site WordPress platform for Proxmox using OpenTofu, Ansible, Docker Compose, and Caddy.
 
