@@ -1,0 +1,49 @@
+<?php
+/**
+ * Plugin Name: Platform WordPress Hardening
+ * Description: Baseline security controls managed by Ansible.
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+add_filter('xmlrpc_enabled', '__return_false');
+add_filter('wp_headers', function ($headers) {
+    unset($headers['X-Pingback']);
+    return $headers;
+});
+
+{% if wordpress_disable_application_passwords | bool %}
+add_filter('wp_is_application_passwords_available', '__return_false');
+{% endif %}
+
+remove_action('wp_head', 'wp_generator');
+add_filter('the_generator', '__return_empty_string');
+
+add_action('template_redirect', function () {
+    if (is_author()) {
+        status_header(404);
+        nocache_headers();
+        exit;
+    }
+});
+
+add_filter('rest_endpoints', function ($endpoints) {
+{% if wordpress_restrict_rest_users | bool %}
+    foreach ($endpoints as $route => $handlers) {
+        if (strpos($route, '/wp/v2/users') === 0) {
+            unset($endpoints[$route]);
+        }
+    }
+{% endif %}
+    return $endpoints;
+});
+
+add_action('init', function () {
+    if (isset($_GET['author']) && !is_admin()) {
+        status_header(404);
+        nocache_headers();
+        exit;
+    }
+});

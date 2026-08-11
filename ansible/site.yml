@@ -1,0 +1,318 @@
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: Install Docker base packages
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - docker.io
+          - openssl
+        state: present
+        update_cache: true
+
+    - name: Install Docker Compose plugin package when available
+      apt:
+        name: docker-compose-v2
+        state: present
+      register: docker_compose_v2_install
+      failed_when: false
+
+    - name: Verify Docker Compose plugin is available
+      command: docker compose version
+      register: docker_compose_version
+      changed_when: false
+
+    - name: Ensure Docker service is enabled and running
+      service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure application directory exists
+      file:
+        path: "{{ wordpress_app_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure shared WordPress standard roots exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ wordpress_runtime_root }}"
+        - "{{ wordpress_deploy_root }}"
+
+    - name: Validate WordPress site IDs
+      assert:
+        that:
+          - item.id is match('^[a-z0-9_]+$')
+          - item.server_name is defined
+        fail_msg: "Each wordpress_sites entry needs an id using only lowercase letters, numbers, underscores, and a server_name."
+      loop: "{{ wordpress_sites }}"
+
+    - name: Select WordPress sites to deploy
+      set_fact:
+        wordpress_deploy_sites: "{{ wordpress_sites if (wordpress_site | default('') | length == 0) else (wordpress_sites | selectattr('id', 'equalto', wordpress_site) | list) }}"
+
+    - name: Validate selected WordPress site exists
+      assert:
+        that:
+          - wordpress_deploy_sites | length > 0
+        fail_msg: "No site matched wordpress_site={{ wordpress_site | default('') }}. Check ansible/group_vars/all.yml."
+
+    - name: Ensure per-site directories exist
+      file:
+        path: "{{ wordpress_app_dir }}/sites/{{ item.id }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      loop: "{{ wordpress_deploy_sites }}"
+
+    - name: Ensure per-site runtime root directories exist
+      file:
+        path: "{{ wordpress_runtime_root }}/{{ item.id }}"
+        state: directory
+        owner: "33"
+        group: "33"
+        mode: "0770"
+      loop: "{{ wordpress_deploy_sites }}"
+
+    - name: Ensure per-site deploy directories exist
+      file:
+        path: "{{ wordpress_deploy_root }}/{{ item.id }}"
+        state: directory
+        owner: root
+        group: docker
+        mode: "0775"
+      loop: "{{ wordpress_deploy_sites }}"
+
+    - name: Ensure per-site runtime subdirectories exist
+      file:
+        path: "{{ wordpress_runtime_root }}/{{ item.0.id }}/{{ item.1 }}"
+        state: directory
+        owner: "33"
+        group: "33"
+        mode: "0770"
+      loop: "{{ wordpress_deploy_sites | product(['cache', 'logs', 'secrets', 'shared']) | list }}"
+
+    - name: Check for existing per-site environment files
+      stat:
+        path: "{{ wordpress_app_dir }}/sites/{{ item.id }}/.env"
+      loop: "{{ wordpress_deploy_sites }}"
+      register: wordpress_site_env_files
+
+    - name: Create per-site environment files with generated database passwords
+      shell: |
+        set -eu
+        umask 077
+        db_password=$(openssl rand -base64 32)
+        site_url="{{ item.item.url | default(('http://' ~ (ansible_host | default(inventory_hostname))) if item.item.server_name == ':80' else ('https://' ~ item.item.server_name), true) }}"
+        cat > "{{ wordpress_app_dir }}/sites/{{ item.item.id }}/.env" <<EOF
+        WORDPRESS_HOME=${site_url}
+        WORDPRESS_SITEURL=${site_url}
+        WORDPRESS_DB_NAME={{ item.item.db_name | default(item.item.id) }}
+        WORDPRESS_DB_USER={{ item.item.db_user | default(item.item.id) }}
+        WORDPRESS_DB_PASSWORD=${db_password}
+        MARIADB_DATABASE={{ item.item.db_name | default(item.item.id) }}
+        MARIADB_USER={{ item.item.db_user | default(item.item.id) }}
+        MARIADB_PASSWORD=${db_password}
+        MARIADB_ROOT_PASSWORD=$(openssl rand -base64 32)
+        EOF
+      args:
+        executable: /bin/bash
+      loop: "{{ wordpress_site_env_files.results }}"
+      when: not item.stat.exists
+      no_log: true
+
+    - name: Ensure per-site public URLs are current in env files
+      shell: |
+        set -eu
+        env_file="{{ wordpress_app_dir }}/sites/{{ item.id }}/.env"
+        site_url="{{ item.url | default(('http://' ~ (ansible_host | default(inventory_hostname))) if item.server_name == ':80' else ('https://' ~ item.server_name), true) }}"
+        grep -q '^WORDPRESS_HOME=' "$env_file" && sed -i "s|^WORDPRESS_HOME=.*|WORDPRESS_HOME=${site_url}|" "$env_file" || echo "WORDPRESS_HOME=${site_url}" >> "$env_file"
+        grep -q '^WORDPRESS_SITEURL=' "$env_file" && sed -i "s|^WORDPRESS_SITEURL=.*|WORDPRESS_SITEURL=${site_url}|" "$env_file" || echo "WORDPRESS_SITEURL=${site_url}" >> "$env_file"
+        chgrp docker "$env_file"
+        chmod 0660 "$env_file"
+      args:
+        executable: /bin/bash
+      loop: "{{ wordpress_deploy_sites }}"
+      no_log: true
+
+    - name: Ensure per-site runtime env paths are current in env files
+      shell: |
+        set -eu
+        env_file="{{ wordpress_app_dir }}/sites/{{ item.id }}/.env"
+        runtime_dir="{{ wordpress_runtime_root }}/{{ item.id }}"
+        log_dir="${runtime_dir}/logs"
+        token_file="${runtime_dir}/cache/salesforce_client_credentials_token.json"
+        grep -q '^SITE_RUNTIME_DIR=' "$env_file" && sed -i "s|^SITE_RUNTIME_DIR=.*|SITE_RUNTIME_DIR=${runtime_dir}|" "$env_file" || echo "SITE_RUNTIME_DIR=${runtime_dir}" >> "$env_file"
+        grep -q '^SITE_LOG_DIR=' "$env_file" && sed -i "s|^SITE_LOG_DIR=.*|SITE_LOG_DIR=${log_dir}|" "$env_file" || echo "SITE_LOG_DIR=${log_dir}" >> "$env_file"
+        grep -q '^CLIENTCREDENTIALTOKEN=' "$env_file" && sed -i "s|^CLIENTCREDENTIALTOKEN=.*|CLIENTCREDENTIALTOKEN=${token_file}|" "$env_file" || echo "CLIENTCREDENTIALTOKEN=${token_file}" >> "$env_file"
+        chgrp docker "$env_file"
+        chmod 0660 "$env_file"
+      args:
+        executable: /bin/bash
+      loop: "{{ wordpress_deploy_sites }}"
+      no_log: true
+
+    - name: Ensure per-site environment directories are accessible to Docker operators
+      file:
+        path: "{{ wordpress_app_dir }}/sites/{{ item.id }}"
+        state: directory
+        owner: root
+        group: docker
+        mode: "0775"
+      loop: "{{ wordpress_deploy_sites }}"
+
+    - name: Ensure per-site environment files are readable by Docker operators
+      file:
+        path: "{{ wordpress_app_dir }}/sites/{{ item.id }}/.env"
+        state: file
+        owner: root
+        group: docker
+        mode: "0660"
+      loop: "{{ wordpress_deploy_sites }}"
+
+    - name: Deploy Docker Compose file
+      template:
+        src: ../compose/site/compose.yml.j2
+        dest: "{{ wordpress_app_dir }}/compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Deploy Caddyfile
+      template:
+        src: ../compose/proxy/Caddyfile.j2
+        dest: "{{ wordpress_app_dir }}/Caddyfile"
+        owner: root
+        group: root
+        mode: "0644"
+      register: wordpress_caddyfile_deploy
+
+    - name: Ensure WordPress must-use plugin directory exists
+      file:
+        path: "{{ wordpress_app_dir }}/mu-plugins"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deploy WordPress hardening must-use plugin
+      template:
+        src: templates/wordpress-hardening.php.j2
+        dest: "{{ wordpress_app_dir }}/mu-plugins/platform-hardening.php"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start WordPress stack
+      command: "docker compose up -d caddy {% for site in wordpress_deploy_sites %}{{ site.id }}_db {{ site.id }}_wordpress {% endfor %}"
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+      register: wordpress_compose_up
+      changed_when: "'Started' in wordpress_compose_up.stdout or 'Created' in wordpress_compose_up.stdout or 'Recreated' in wordpress_compose_up.stdout or 'Pulled' in wordpress_compose_up.stdout"
+
+    - name: Recreate Caddy when the Caddyfile changes
+      command: docker compose up -d --force-recreate caddy
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+      when: wordpress_caddyfile_deploy.changed
+      changed_when: true
+
+    - name: Recreate selected WordPress containers after URL env updates
+      command: "docker compose up -d --force-recreate {% for site in wordpress_deploy_sites %}{{ site.id }}_wordpress {% endfor %}"
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+      register: wordpress_recreate
+      changed_when: "'Recreated' in wordpress_recreate.stdout or 'Started' in wordpress_recreate.stdout or 'Created' in wordpress_recreate.stdout"
+
+    - name: Check whether WordPress is installed
+      command: "docker compose run --rm {{ item.id }}_wpcli wp core is-installed"
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+      loop: "{{ wordpress_deploy_sites }}"
+      register: wordpress_core_installed
+      changed_when: false
+      failed_when: false
+
+    - name: Update WordPress home/siteurl and replace old private URLs
+      shell: |
+        set -eu
+        site_url="{{ item.item.url | default(('http://' ~ (ansible_host | default(inventory_hostname))) if item.item.server_name == ':80' else ('https://' ~ item.item.server_name), true) }}"
+        private_http="http://{{ ansible_host | default(inventory_hostname) }}"
+        private_https="https://{{ ansible_host | default(inventory_hostname) }}"
+        current_home=$(docker compose run --rm {{ item.item.id }}_wpcli wp option get home || true)
+        current_siteurl=$(docker compose run --rm {{ item.item.id }}_wpcli wp option get siteurl || true)
+        docker compose run --rm {{ item.item.id }}_wpcli wp option update home "$site_url"
+        docker compose run --rm {{ item.item.id }}_wpcli wp option update siteurl "$site_url"
+        if [ -n "$current_home" ] && [ "$current_home" != "$site_url" ]; then
+          docker compose run --rm {{ item.item.id }}_wpcli wp search-replace "$current_home" "$site_url" --skip-columns=guid --all-tables
+        fi
+        if [ -n "$current_siteurl" ] && [ "$current_siteurl" != "$site_url" ] && [ "$current_siteurl" != "$current_home" ]; then
+          docker compose run --rm {{ item.item.id }}_wpcli wp search-replace "$current_siteurl" "$site_url" --skip-columns=guid --all-tables
+        fi
+        if [ "$private_http" != "$site_url" ]; then
+          docker compose run --rm {{ item.item.id }}_wpcli wp search-replace "$private_http" "$site_url" --skip-columns=guid --all-tables
+        fi
+        if [ "$private_https" != "$site_url" ]; then
+          docker compose run --rm {{ item.item.id }}_wpcli wp search-replace "$private_https" "$site_url" --skip-columns=guid --all-tables
+        fi
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+        executable: /bin/bash
+      loop: "{{ wordpress_core_installed.results }}"
+      when: item.rc == 0
+      register: wordpress_url_update
+      changed_when: "'Success:' in wordpress_url_update.stdout or 'Made ' in wordpress_url_update.stdout"
+
+    - name: Fix writable WordPress content ownership before plugin operations
+      shell: |
+        set -eu
+        docker compose exec -T {{ item.item.id }}_wordpress sh -c '
+          mkdir -p /var/www/html/wp-content/plugins /var/www/html/wp-content/themes /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade
+          chown -R www-data:www-data /var/www/html/wp-content/plugins /var/www/html/wp-content/themes /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade
+          chmod -R u+rwX,go+rX /var/www/html/wp-content/plugins /var/www/html/wp-content/themes /var/www/html/wp-content/uploads /var/www/html/wp-content/upgrade
+        '
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+        executable: /bin/bash
+      loop: "{{ wordpress_core_installed.results }}"
+      when: item.rc == 0
+      changed_when: false
+
+    - name: Install and activate recommended WordPress security plugins
+      shell: |
+        set -eu
+        for plugin in {{ wordpress_security_plugins | join(' ') }}; do
+          if ! docker compose run --rm {{ item.item.id }}_wpcli wp plugin is-installed "$plugin"; then
+            docker compose run --rm {{ item.item.id }}_wpcli wp plugin install "$plugin"
+          fi
+          docker compose run --rm {{ item.item.id }}_wpcli wp plugin activate "$plugin"
+        done
+      args:
+        chdir: "{{ wordpress_app_dir }}"
+        executable: /bin/bash
+      loop: "{{ wordpress_core_installed.results }}"
+      when: item.rc == 0
+      register: wordpress_security_plugin_install
+      changed_when: "'Plugin installed successfully' in wordpress_security_plugin_install.stdout or 'Plugin activated' in wordpress_security_plugin_install.stdout"
+
+    - name: Explain skipped WordPress security plugin activation
+      debug:
+        msg: "WordPress core is not installed yet for {{ item.item.id }}. Complete its browser setup, then rerun this playbook to activate security plugins: {{ wordpress_security_plugins | join(', ') }}."
+      loop: "{{ wordpress_core_installed.results }}"
+      when: item.rc != 0
+
+    - name: Show access URL
+      debug:
+        msg: "{{ item.id }} should be available at {{ item.url | default(('http://' ~ (ansible_host | default(inventory_hostname))) if item.server_name == ':80' else ('https://' ~ item.server_name), true) }} after containers finish starting."
+      loop: "{{ wordpress_deploy_sites }}"

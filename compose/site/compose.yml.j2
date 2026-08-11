@@ -1,0 +1,78 @@
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+{% for site in wordpress_sites %}
+  {{ site.id }}_wordpress:
+    image: wordpress:php8.3-apache
+    restart: unless-stopped
+    env_file:
+      - ./sites/{{ site.id }}/.env
+    environment:
+      WORDPRESS_DB_HOST: {{ site.id }}_db:3306
+      WORDPRESS_CONFIG_EXTRA: |
+        if (
+          (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') ||
+          (isset($$_SERVER['HTTP_CF_VISITOR']) && strpos($$_SERVER['HTTP_CF_VISITOR'], 'https') !== false)
+        ) {
+          $$_SERVER['HTTPS'] = 'on';
+        }
+        if (getenv('WORDPRESS_HOME')) {
+          define('WP_HOME', getenv('WORDPRESS_HOME'));
+        }
+        if (getenv('WORDPRESS_SITEURL')) {
+          define('WP_SITEURL', getenv('WORDPRESS_SITEURL'));
+        }
+        define('DISALLOW_FILE_EDIT', true);
+        define('DISALLOW_FILE_MODS', {{ wordpress_disallow_file_mods | bool | ternary('true', 'false') }});
+        define('WP_AUTO_UPDATE_CORE', true);
+        define('FORCE_SSL_ADMIN', {{ wordpress_force_ssl_admin | bool | ternary('true', 'false') }});
+    volumes:
+      - {{ site.id }}_wordpress_data:/var/www/html
+      - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+      - {{ wordpress_runtime_root }}/{{ site.id }}:{{ wordpress_runtime_root }}/{{ site.id }}
+    depends_on:
+      - {{ site.id }}_db
+
+  {{ site.id }}_wpcli:
+    image: wordpress:cli-php8.3
+    user: "33:33"
+    profiles:
+      - cli
+    env_file:
+      - ./sites/{{ site.id }}/.env
+    environment:
+      WORDPRESS_DB_HOST: {{ site.id }}_db:3306
+    volumes:
+      - {{ site.id }}_wordpress_data:/var/www/html
+      - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+      - {{ wordpress_runtime_root }}/{{ site.id }}:{{ wordpress_runtime_root }}/{{ site.id }}
+    depends_on:
+      - {{ site.id }}_db
+      - {{ site.id }}_wordpress
+
+  {{ site.id }}_db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    env_file:
+      - ./sites/{{ site.id }}/.env
+    volumes:
+      - {{ site.id }}_db_data:/var/lib/mysql
+
+{% endfor %}
+
+volumes:
+  caddy_data:
+  caddy_config:
+{% for site in wordpress_sites %}
+  {{ site.id }}_wordpress_data:
+  {{ site.id }}_db_data:
+{% endfor %}

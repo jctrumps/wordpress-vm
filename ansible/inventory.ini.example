@@ -1,0 +1,2 @@
+[wordpress]
+wordpress-01 ansible_host=<VM_IP> ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/wordpress_01_ed25519

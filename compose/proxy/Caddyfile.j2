@@ -1,0 +1,41 @@
+{% for site in wordpress_sites %}
+{% if site.caddy_origin_scheme is defined %}{{ site.caddy_origin_scheme }}://{{ site.server_name }}{% elif site.http_only | default(false) | bool %}http://{{ site.server_name }}{% else %}{{ site.server_name }}{% endif %} {
+    encode gzip zstd
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy strict-origin-when-cross-origin
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    respond /xmlrpc.php "XML-RPC disabled" 403
+    respond /wp-config.php "Not found" 404
+    respond /readme.html "Not found" 404
+    respond /license.txt "Not found" 404
+
+    @author_enum query author=*
+    respond @author_enum "Not found" 404
+
+{% if wordpress_admin_private_only | bool %}
+    @admin_from_public {
+        path /wp-login.php /wp-admin*
+        not path /wp-admin/admin-ajax.php
+    }
+    respond @admin_from_public "WordPress admin is restricted" 403
+{% endif %}
+
+    reverse_proxy {{ site.id }}_wordpress:80 {
+{% if (site.caddy_origin_scheme is defined and site.caddy_origin_scheme == 'http') or (site.http_only | default(false) | bool) %}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-SSL on
+{% else %}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-SSL {scheme}
+{% endif %}
+        header_up X-Forwarded-Host {host}
+    }
+}
+
+{% endfor %}

@@ -1,0 +1,36 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# Do not commit terraform.tfvars because it contains secrets.
+
+proxmox_endpoint  = "https://proxmox.example.com:8006/api2/json"
+proxmox_api_token = "root@pam!opentofu=REPLACE_WITH_TOKEN_SECRET"
+proxmox_insecure  = true
+
+proxmox_node  = "pve"
+template_vm_id = 9000
+
+vm_name   = "wordpress-01"
+vm_id     = 130
+vm_tags   = ["wordpress", "docker", "opentofu"]
+
+vm_cpu_cores   = 2
+vm_memory_mb   = 4096
+vm_disk_size_gb = 40
+vm_datastore    = "local-lvm"
+
+vm_network_bridge = "vmbr0"
+vm_username       = "ubuntu"
+
+# Set true only if the template already has qemu-guest-agent installed and running.
+vm_qemu_agent_enabled = false
+
+# Windows example: C:/Users/YOU/.ssh/wordpress_ed25519.pub
+# WSL/Linux example: ~/.ssh/wordpress_ed25519.pub
+vm_ssh_public_key_path = "~/.ssh/wordpress_ed25519.pub"
+
+# Use DHCP by default. For static addressing, set address like "192.168.1.50/24"
+# and set vm_ipv4_gateway to the router address.
+vm_ipv4_address = "dhcp"
+vm_ipv4_gateway = null
+
+vm_dns_domain  = null
+vm_dns_servers = []

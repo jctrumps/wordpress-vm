@@ -1,0 +1,26 @@
+---
+wordpress_app_dir: /opt/wordpress-platform
+wordpress_runtime_root: /opt/wordpress-runtime
+wordpress_deploy_root: /opt/wordpress-deploy
+wordpress_sites:
+  - id: smoke_test
+    server_name: ":80"
+    db_name: smoke_test
+    db_user: smoke_test
+
+  #- id: example-site
+  #  server_name: "example.com"
+  #  url: "https://example.com"
+  #  http_only: true
+  #  db_name: example_site
+  #  db_user: example_site
+
+# Baseline WordPress security controls. See docs/wordpress-security.md.
+wordpress_admin_private_only: true
+wordpress_force_ssl_admin: false
+wordpress_disallow_file_mods: false
+wordpress_disable_application_passwords: true
+wordpress_restrict_rest_users: true
+wordpress_security_plugins:
+  - limit-login-attempts-reloaded
+  - two-factor
